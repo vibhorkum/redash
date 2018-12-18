@@ -2,7 +2,6 @@ import logging
 import signal
 import time
 
-import pystache
 import redis
 from celery.exceptions import SoftTimeLimitExceeded, TimeLimitExceeded
 from celery.result import AsyncResult
@@ -12,7 +11,7 @@ from six import text_type
 from redash import models, redis_connection, settings, statsd_client
 from redash.query_runner import InterruptException
 from redash.tasks.alerts import check_alerts_for_query
-from redash.utils import gen_query_hash, json_dumps, json_loads, utcnow
+from redash.utils import gen_query_hash, json_dumps, json_loads, utcnow, mustache_render
 from redash.worker import celery
 
 logger = get_task_logger(__name__)
@@ -276,7 +275,7 @@ def refresh_queries():
             if settings.FEATURE_DISABLE_REFRESH_QUERIES:
                 logging.info("Disabled refresh queries.")
             elif query.org.is_disabled:
-                logging.info("Skipping refresh of %s because org is disabled.", query.id)
+                logging.debug("Skipping refresh of %s because org is disabled.", query.id)
             elif query.data_source is None:
                 logging.info("Skipping refresh of %s because the datasource is none.", query.id)
             elif query.data_source.paused:
@@ -285,7 +284,7 @@ def refresh_queries():
                 if query.options and len(query.options.get('parameters', [])) > 0:
                     query_params = {p['name']: p.get('value')
                                     for p in query.options['parameters']}
-                    query_text = pystache.render(query.query_text, query_params)
+                    query_text = mustache_render(query.query_text, query_params)
                 else:
                     query_text = query.query_text
 

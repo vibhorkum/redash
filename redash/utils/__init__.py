@@ -8,6 +8,7 @@ import os
 import random
 import re
 import uuid
+import binascii
 
 import pystache
 import pytz
@@ -81,6 +82,8 @@ class JSONEncoder(simplejson.JSONEncoder):
             return str(o)
         elif isinstance(o, (datetime.date, datetime.time)):
             return o.isoformat()
+        elif isinstance(o, buffer):
+            return binascii.hexlify(o)
         else:
             return super(JSONEncoder, self).default(o)
 
@@ -96,6 +99,11 @@ def json_dumps(data, *args, **kwargs):
     simplejson.dumps function."""
     kwargs.setdefault('cls', JSONEncoder)
     return simplejson.dumps(data, *args, **kwargs)
+
+
+def mustache_render(template, context=None, **kwargs):
+    renderer = pystache.Renderer(escape=lambda u: u)
+    return renderer.render(template, context, **kwargs)
 
 
 def build_url(request, host, path):
