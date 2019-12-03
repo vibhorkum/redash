@@ -5,14 +5,19 @@ import { react2angular } from 'react2angular';
 
 import AceEditor from 'react-ace';
 import ace from 'brace';
-import toastr from 'angular-toastr';
+import notification from '@/services/notification';
 
 import 'brace/ext/language_tools';
 import 'brace/mode/json';
 import 'brace/mode/python';
 import 'brace/mode/sql';
+import 'brace/mode/yaml';
 import 'brace/theme/textmate';
 import 'brace/ext/searchbox';
+
+import { Query } from '@/services/query';
+import { QuerySnippet } from '@/services/query-snippet';
+import { KeyboardShortcuts } from '@/services/keyboard-shortcuts';
 
 import localOptions from '@/lib/localOptions';
 import AutocompleteToggle from '@/components/AutocompleteToggle';
@@ -36,6 +41,7 @@ function defineDummySnippets(mode) {
 defineDummySnippets('python');
 defineDummySnippets('sql');
 defineDummySnippets('json');
+defineDummySnippets('yaml');
 
 class QueryEditor extends React.Component {
   static propTypes = {
@@ -48,7 +54,7 @@ class QueryEditor extends React.Component {
     isDirty: PropTypes.bool.isRequired,
     isQueryOwner: PropTypes.bool.isRequired,
     updateDataSource: PropTypes.func.isRequired,
-    canExecuteQuery: PropTypes.func.isRequired,
+    canExecuteQuery: PropTypes.bool.isRequired,
     executeQuery: PropTypes.func.isRequired,
     queryExecuting: PropTypes.bool.isRequired,
     saveQuery: PropTypes.func.isRequired,
@@ -143,6 +149,7 @@ class QueryEditor extends React.Component {
     editor.commands.bindKey({ win: 'Ctrl+P', mac: null }, null);
     // Lineup only mac
     editor.commands.bindKey({ win: null, mac: 'Ctrl+P' }, 'golineup');
+    editor.commands.bindKey({ win: 'Ctrl+Shift+F', mac: 'Cmd+Shift+F' }, this.formatQuery);
 
     // Reset Completer in case dot is pressed
     editor.commands.on('afterExec', (e) => {
@@ -152,8 +159,7 @@ class QueryEditor extends React.Component {
       }
     });
 
-    // eslint-disable-next-line react/prop-types
-    this.props.QuerySnippet.query((snippets) => {
+    QuerySnippet.query((snippets) => {
       const snippetManager = snippetsModule.snippetManager;
       const m = {
         snippetText: '',
@@ -194,7 +200,7 @@ class QueryEditor extends React.Component {
     const selectedQueryText = (rawSelectedQueryText.length > 1) ? rawSelectedQueryText : null;
     this.setState({ selectedQueryText });
     this.props.updateSelectedQuery(selectedQueryText);
-  }
+  };
 
   updateQuery = (queryText) => {
     this.props.updateQuery(queryText);
@@ -202,23 +208,26 @@ class QueryEditor extends React.Component {
   };
 
   formatQuery = () => {
-    // eslint-disable-next-line react/prop-types
-    const format = this.props.Query.format;
-    format(this.props.dataSource.syntax || 'sql', this.props.queryText)
+    Query.format(this.props.dataSource.syntax || 'sql', this.props.queryText)
       .then(this.updateQuery)
-      .catch(error => toastr.error(error));
+      .catch(error => notification.error(error));
   };
 
   toggleAutocomplete = (state) => {
     this.setState({ autocompleteQuery: state });
     localOptions.set('liveAutocomplete', state);
-  }
+  };
+
+  componentDidUpdate = () => {
+    // ANGULAR_REMOVE_ME  Work-around for a resizing issue, see https://github.com/getredash/redash/issues/3353
+    const { editor } = this.refEditor.current;
+    editor.resize();
+  };
 
   render() {
-    // eslint-disable-next-line react/prop-types
-    const modKey = this.props.KeyboardShortcuts.modKey;
+    const modKey = KeyboardShortcuts.modKey;
 
-    const isExecuteDisabled = this.props.queryExecuting || !this.props.canExecuteQuery();
+    const isExecuteDisabled = this.props.queryExecuting || !this.props.canExecuteQuery;
 
     return (
       <section style={{ height: '100%' }} data-test="QueryEditor">
@@ -252,17 +261,13 @@ class QueryEditor extends React.Component {
             <div className="form-inline d-flex">
               <Tooltip
                 placement="top"
-                title={
-                  <span>
-                    Add New Parameter (<i>{modKey} + P</i>)
-                  </span>
-                }
+                title={<span>Add New Parameter (<i>{modKey} + P</i>)</span>}
               >
                 <button type="button" className="btn btn-default m-r-5" onClick={this.props.addNewParameter}>
                   &#123;&#123;&nbsp;&#125;&#125;
                 </button>
               </Tooltip>
-              <Tooltip placement="top" title="Format Query">
+              <Tooltip placement="top" title={<>Format Query (<i>{modKey} + Shift + F</i>)</>}>
                 <button type="button" className="btn btn-default m-r-5" onClick={this.formatQuery}>
                   <span className="zmdi zmdi-format-indent-increase" />
                 </button>
@@ -285,7 +290,13 @@ class QueryEditor extends React.Component {
               </select>
               {this.props.canEdit ? (
                 <Tooltip placement="top" title={modKey + ' + S'}>
-                  <button className="btn btn-default m-l-5" onClick={this.props.saveQuery} title="Save">
+                  <button
+                    type="button"
+                    className="btn btn-default m-l-5"
+                    onClick={this.props.saveQuery}
+                    data-test="SaveButton"
+                    title="Save"
+                  >
                     <span className="fa fa-floppy-o" />
                     <span className="hidden-xs m-l-5">Save</span>
                     {this.props.isDirty ? '*' : null}
@@ -320,7 +331,7 @@ class QueryEditor extends React.Component {
 }
 
 export default function init(ngModule) {
-  ngModule.component('queryEditor', react2angular(QueryEditor, null, ['QuerySnippet', 'Query', 'KeyboardShortcuts']));
+  ngModule.component('queryEditor', react2angular(QueryEditor));
 }
 
 init.init = true;

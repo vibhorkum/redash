@@ -9,12 +9,13 @@ from redash.handlers.base import (BaseResource, get_object_or_404,
                                   require_fields)
 from redash.permissions import (require_access, require_admin_or_owner,
                                 require_permission, view_only)
+from redash.utils import json_dumps
 
 
 class AlertResource(BaseResource):
     def get(self, alert_id):
         alert = get_object_or_404(models.Alert.get_by_id_and_org, alert_id, self.current_org)
-        require_access(alert.groups, self.current_user, view_only)
+        require_access(alert, self.current_user, view_only)
         self.record_event({
             'action': 'view',
             'object_id': alert.id,
@@ -46,6 +47,34 @@ class AlertResource(BaseResource):
         models.db.session.commit()
 
 
+class AlertMuteResource(BaseResource):
+    def post(self, alert_id):
+        alert = get_object_or_404(models.Alert.get_by_id_and_org, alert_id, self.current_org)
+        require_admin_or_owner(alert.user.id)
+
+        alert.options['muted'] = True
+        models.db.session.commit()
+
+        self.record_event({
+            'action': 'mute',
+            'object_id': alert.id,
+            'object_type': 'alert'
+        })
+
+    def delete(self, alert_id):
+        alert = get_object_or_404(models.Alert.get_by_id_and_org, alert_id, self.current_org)
+        require_admin_or_owner(alert.user.id)
+
+        alert.options['muted'] = False
+        models.db.session.commit()
+
+        self.record_event({
+            'action': 'unmute',
+            'object_id': alert.id,
+            'object_type': 'alert'
+        })
+
+
 class AlertListResource(BaseResource):
     def post(self):
         req = request.get_json(True)
@@ -53,14 +82,14 @@ class AlertListResource(BaseResource):
 
         query = models.Query.get_by_id_and_org(req['query_id'],
                                                self.current_org)
-        require_access(query.groups, self.current_user, view_only)
+        require_access(query, self.current_user, view_only)
 
         alert = models.Alert(
             name=req['name'],
             query_rel=query,
             user=self.current_user,
             rearm=req.get('rearm'),
-            options=req['options']
+            options=req['options'],
         )
 
         models.db.session.add(alert)
@@ -89,7 +118,7 @@ class AlertSubscriptionListResource(BaseResource):
         req = request.get_json(True)
 
         alert = models.Alert.get_by_id_and_org(alert_id, self.current_org)
-        require_access(alert.groups, self.current_user, view_only)
+        require_access(alert, self.current_user, view_only)
         kwargs = {'alert': alert, 'user': self.current_user}
 
         if 'destination_id' in req:
@@ -113,7 +142,7 @@ class AlertSubscriptionListResource(BaseResource):
     def get(self, alert_id):
         alert_id = int(alert_id)
         alert = models.Alert.get_by_id_and_org(alert_id, self.current_org)
-        require_access(alert.groups, self.current_user, view_only)
+        require_access(alert, self.current_user, view_only)
 
         subscriptions = models.AlertSubscription.all(alert_id)
         return [s.to_dict() for s in subscriptions]

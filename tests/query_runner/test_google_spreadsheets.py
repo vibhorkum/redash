@@ -1,17 +1,16 @@
-# -*- coding: utf-8 -*-
 import datetime
 from unittest import TestCase
 
 from mock import MagicMock
 
 from redash.query_runner import TYPE_DATETIME, TYPE_FLOAT
-from redash.query_runner.google_spreadsheets import TYPE_BOOLEAN, TYPE_STRING, _get_columns_and_column_names, _value_eval_list, parse_query
+from redash.query_runner.google_spreadsheets import TYPE_BOOLEAN, TYPE_STRING, _get_columns_and_column_names, _value_eval_list, is_url_key, parse_query
 from redash.query_runner.google_spreadsheets import WorksheetNotFoundError, parse_spreadsheet, parse_worksheet
 
 
 class TestValueEvalList(TestCase):
     def test_handles_unicode(self):
-        values = [u'יוניקוד', 'test', 'value']
+        values = ['יוניקוד', 'test', 'value']
         self.assertEqual(values, _value_eval_list(values, [TYPE_STRING]*len(values)))
 
     def test_handles_boolean(self):
@@ -66,7 +65,7 @@ class TestParseWorksheet(TestCase):
         worksheet = [['Column', 'Another Column', 'Column'], ['A', 'TRUE', '1'], ['B', 'FALSE', '2'], ['C', 'TRUE', '3'], ['D', 'FALSE', '4']]
         parsed = parse_worksheet(worksheet)
 
-        columns = map(lambda c: c['name'], parsed['columns'])
+        columns = [column['name'] for column in parsed['columns']]
         self.assertEqual('Column', columns[0])
         self.assertEqual('Another Column', columns[1])
         self.assertEqual('Column1', columns[2])
@@ -100,3 +99,12 @@ class TestGetColumnsAndColumnNames(TestCase):
         columns, column_names = _get_columns_and_column_names(_columns)
 
         self.assertEqual(['foo', 'column_B', 'baz', 'column_D'], column_names)
+
+
+class TestIsUrlKey(TestCase):
+    def test_is_url_key(self):
+        _key = 'https://docs.google.com/spreadsheets/d/key/edit#gid=12345678'
+        self.assertTrue(is_url_key(_key))
+
+        _key = 'key|0'
+        self.assertFalse(is_url_key(_key))

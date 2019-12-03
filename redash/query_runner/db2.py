@@ -1,9 +1,7 @@
-import os
-import json
 import logging
 
 from redash.query_runner import *
-from redash.utils import JSONEncoder
+from redash.utils import json_dumps, json_loads
 
 logger = logging.getLogger(__name__)
 
@@ -82,10 +80,10 @@ class DB2(BaseSQLQueryRunner):
         if error is not None:
             raise Exception("Failed getting schema.")
 
-        results = json.loads(results)
+        results = json_loads(results)
 
         for row in results['rows']:
-            if row['TABLE_SCHEMA'] != u'public':
+            if row['TABLE_SCHEMA'] != 'public':
                 table_name = '{}.{}'.format(row['TABLE_SCHEMA'], row['TABLE_NAME'])
             else:
                 table_name = row['TABLE_NAME']
@@ -107,7 +105,7 @@ class DB2(BaseSQLQueryRunner):
         """
         self._get_definitions(schema, query)
 
-        return schema.values()
+        return list(schema.values())
 
     def _get_connection(self):
         self.connection_string = "DATABASE={};HOSTNAME={};PORT={};PROTOCOL=TCPIP;UID={};PWD={};".format(
@@ -125,11 +123,11 @@ class DB2(BaseSQLQueryRunner):
 
             if cursor.description is not None:
                 columns = self.fetch_columns([(i[0], types_map.get(i[1], None)) for i in cursor.description])
-                rows = [dict(zip((c['name'] for c in columns), row)) for row in cursor]
+                rows = [dict(zip((column['name'] for column in columns), row)) for row in cursor]
 
                 data = {'columns': columns, 'rows': rows}
                 error = None
-                json_data = json.dumps(data, cls=JSONEncoder)
+                json_data = json_dumps(data)
             else:
                 error = 'Query completed but it returned no data.'
                 json_data = None

@@ -8,6 +8,7 @@ logger = logging.getLogger(__name__)
 
 try:
     from dql import Engine, FragmentEngine
+    from dynamo3 import DynamoDBError
     from pyparsing import ParseException
     enabled = True
 except ImportError as e:
@@ -32,6 +33,8 @@ types_map = {
 
 
 class DynamoDBSQL(BaseSQLQueryRunner):
+    should_annotate_query = False
+
     @classmethod
     def configuration_schema(cls):
         return {
@@ -55,10 +58,6 @@ class DynamoDBSQL(BaseSQLQueryRunner):
     def test_connection(self):
         engine = self._connect()
         list(engine.connection.list_tables())
-
-    @classmethod
-    def annotate_query(cls):
-        return False
 
     @classmethod
     def type(cls):
@@ -85,22 +84,33 @@ class DynamoDBSQL(BaseSQLQueryRunner):
     def _get_tables(self, schema):
         engine = self._connect()
 
-        for table in engine.describe_all():
-            schema[table.name] = {'name': table.name, 'columns': table.attrs.keys()}
+        # We can't use describe_all because sometimes a user might give List permission
+        # for * (all tables), but describe permission only for some of them.
+        tables = engine.connection.list_tables()
+        for table_name in tables:
+            try:
+                table = engine.describe(table_name, True)
+                schema[table.name] = {'name': table.name,
+                                      'columns': list(table.attrs.keys())}
+            except DynamoDBError:
+                pass
 
     def run_query(self, query, user):
         engine = None
         try:
             engine = self._connect()
 
-            result = engine.execute(query if str(query).endswith(';') else str(query)+';')
+            if not query.endswith(';'):
+                query = query + ';'
+
+            result = engine.execute(query)
 
             columns = []
             rows = []
 
             # When running a count query it returns the value as a string, in which case
             # we transform it into a dictionary to be the same as regular queries.
-            if isinstance(result, basestring):
+            if isinstance(result, str):
                 # when count < scanned_count, dql returns a string with number of rows scanned
                 value = result.split(" (")[0]
                 if value:
@@ -109,7 +119,7 @@ class DynamoDBSQL(BaseSQLQueryRunner):
 
             for item in result:
                 if not columns:
-                    for k, v in item.iteritems():
+                    for k, v in item.items():
                         columns.append({
                             'name': k,
                             'friendly_name': k,
@@ -121,7 +131,8 @@ class DynamoDBSQL(BaseSQLQueryRunner):
             json_data = json_dumps(data)
             error = None
         except ParseException as e:
-            error = u"Error parsing query at line {} (column {}):\n{}".format(e.lineno, e.column, e.line)
+            error = "Error parsing query at line {} (column {}):\n{}".format(
+                e.lineno, e.column, e.line)
             json_data = None
         except (SyntaxError, RuntimeError) as e:
             error = e.message
@@ -133,5 +144,6 @@ class DynamoDBSQL(BaseSQLQueryRunner):
             json_data = None
 
         return json_data, error
+
 
 register(DynamoDBSQL)

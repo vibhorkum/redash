@@ -1,8 +1,12 @@
-from __future__ import absolute_import
+
 
 import logging
 import socket
 import time
+from redash import settings
+
+from celery.concurrency import asynpool
+asynpool.PROC_ALIVE_TIMEOUT = settings.CELERY_INIT_TIMEOUT
 
 from celery.signals import task_postrun, task_prerun
 from redash import settings, statsd_client
@@ -25,7 +29,7 @@ def metric_name(name, tags):
     if not settings.STATSD_USE_TAGS:
         return name
 
-    tags_string = ",".join(["{}={}".format(k, v) for k, v in tags.iteritems()])
+    tags_string = ",".join(["{}={}".format(k, v) for k, v in tags.items()])
     return "{},{}".format(name, tags_string)
 
 

@@ -1,67 +1,64 @@
-from __future__ import absolute_import
 
 from datetime import timedelta
-from random import randint
+from functools import partial
 
 from flask import current_app
+import logging
 
 from celery import Celery
-from celery.schedules import crontab
 from celery.signals import worker_process_init
-from redash import __version__, safe_create_app, settings
-from redash.metrics import celery as celery_metrics
+from celery.utils.log import get_logger
+
+from rq import get_current_job
+from rq.decorators import job as rq_job
+
+from redash import create_app, extensions, settings, redis_connection, rq_redis_connection
+from redash.metrics import celery as celery_metrics  # noqa
+
+logger = get_logger(__name__)
+
+job = partial(rq_job, connection=rq_redis_connection)
+
+
+class CurrentJobFilter(logging.Filter):
+    def filter(self, record):
+        current_job = get_current_job()
+
+        record.job_id = current_job.id if current_job else ''
+        record.job_func_name = current_job.func_name if current_job else ''
+
+        return True
+
+
+def get_job_logger(name):
+    logger = logging.getLogger('rq.job.' + name)
+
+    handler = logging.StreamHandler()
+    handler.formatter = logging.Formatter(settings.RQ_WORKER_JOB_LOG_FORMAT)
+    handler.addFilter(CurrentJobFilter())
+
+    logger.addHandler(handler)
+    logger.propagate = False
+
+    return logger
+
 
 celery = Celery('redash',
                 broker=settings.CELERY_BROKER,
+                broker_use_ssl=settings.CELERY_SSL_CONFIG,
+                redis_backend_use_ssl=settings.CELERY_SSL_CONFIG,
                 include='redash.tasks')
 
-celery_schedule = {
-    'refresh_queries': {
-        'task': 'redash.tasks.refresh_queries',
-        'schedule': timedelta(seconds=30)
-    },
-    'cleanup_tasks': {
-        'task': 'redash.tasks.cleanup_tasks',
-        'schedule': timedelta(minutes=5)
-    },
-    'refresh_schemas': {
-        'task': 'redash.tasks.refresh_schemas',
-        'schedule': timedelta(minutes=settings.SCHEMAS_REFRESH_SCHEDULE)
-    },
-    'sync_user_details': {
-        'task': 'redash.tasks.sync_user_details',
-        'schedule': timedelta(minutes=1),
-    }
-}
-
-if settings.VERSION_CHECK:
-    celery_schedule['version_check'] = {
-        'task': 'redash.tasks.version_check',
-        # We need to schedule the version check to run at a random hour/minute, to spread the requests from all users
-        # evenly.
-        'schedule': crontab(minute=randint(0, 59), hour=randint(0, 23))
-    }
-
-if settings.QUERY_RESULTS_CLEANUP_ENABLED:
-    celery_schedule['cleanup_query_results'] = {
-        'task': 'redash.tasks.cleanup_query_results',
-        'schedule': timedelta(minutes=5)
-    }
 
 celery.conf.update(result_backend=settings.CELERY_RESULT_BACKEND,
-                   beat_schedule=celery_schedule,
                    timezone='UTC',
                    result_expires=settings.CELERY_RESULT_EXPIRES,
                    worker_log_format=settings.CELERYD_WORKER_LOG_FORMAT,
-                   worker_task_log_format=settings.CELERYD_WORKER_TASK_LOG_FORMAT)
-
-if settings.SENTRY_DSN:
-    from raven import Client
-    from raven.contrib.celery import register_signal
-
-    client = Client(settings.SENTRY_DSN, release=__version__, install_logging_hook=False)
-    register_signal(client)
-
+                   worker_task_log_format=settings.CELERYD_WORKER_TASK_LOG_FORMAT,
+                   worker_prefetch_multiplier=settings.CELERY_WORKER_PREFETCH_MULTIPLIER,
+                   accept_content=settings.CELERY_ACCEPT_CONTENT,
+                   task_serializer=settings.CELERY_TASK_SERIALIZER,
+                   result_serializer=settings.CELERY_RESULT_SERIALIZER)
 
 # Create a new Task base class, that pushes a new Flask app context to allow DB connections if needed.
 TaskBase = celery.Task
@@ -78,17 +75,21 @@ class ContextTask(TaskBase):
 celery.Task = ContextTask
 
 
-# Create Flask app after forking a new worker, to make sure no resources are shared between processes.
 @worker_process_init.connect
 def init_celery_flask_app(**kwargs):
-    app = safe_create_app()
+    """Create the Flask app after forking a new worker.
+
+    This is to make sure no resources are shared between processes.
+    """
+    app = create_app()
     app.app_context().push()
 
 
-# Hook for extensions to add periodic tasks.
 @celery.on_after_configure.connect
 def add_periodic_tasks(sender, **kwargs):
-    app = safe_create_app()
-    periodic_tasks = getattr(app, 'periodic_tasks', {})
-    for params in periodic_tasks.values():
+    """Load all periodic tasks from extensions and add them to Celery."""
+    # Populate the redash.extensions.periodic_tasks dictionary
+    extensions.load_periodic_tasks(logger)
+    for params in extensions.periodic_tasks.values():
+        # Add it to Celery's periodic task registry, too.
         sender.add_periodic_task(**params)

@@ -12,23 +12,20 @@ import ngRoute from 'angular-route';
 import ngResource from 'angular-resource';
 import uiBootstrap from 'angular-ui-bootstrap';
 import uiSelect from 'ui-select';
-import ngMessages from 'angular-messages';
-import toastr from 'angular-toastr';
-import ngUpload from 'angular-base64-upload';
 import vsRepeat from 'angular-vs-repeat';
-import 'angular-moment';
 import 'brace';
-import 'angular-ui-ace';
 import 'angular-resizable';
 import { each, isFunction, extend } from 'lodash';
 
-import '@/lib/sortable';
+import DialogWrapper from '@/components/DialogWrapper';
+import organizationStatus from '@/services/organizationStatus';
 
 import * as filters from '@/filters';
 import registerDirectives from '@/directives';
 import markdownFilter from '@/filters/markdown';
 import dateTimeFilter from '@/filters/datetime';
-import dashboardGridOptions from './dashboard-grid-options';
+import './antd-spinner';
+import moment from 'moment';
 
 const logger = debug('redash:config');
 
@@ -40,25 +37,35 @@ Pace.options.shouldHandlePushState = (prevUrl, newUrl) => {
   return prevPrefix !== newPrefix;
 };
 
+moment.updateLocale('en', {
+  relativeTime: {
+    future: '%s',
+    past: '%s',
+    s: 'just now',
+    m: 'a minute ago',
+    mm: '%d minutes ago',
+    h: 'an hour ago',
+    hh: '%d hours ago',
+    d: 'a day ago',
+    dd: '%d days ago',
+    M: 'a month ago',
+    MM: '%d months ago',
+    y: 'a year ago',
+    yy: '%d years ago',
+  },
+});
+
 const requirements = [
   ngRoute,
   ngResource,
   ngSanitize,
   uiBootstrap,
-  ngMessages,
   uiSelect,
-  'angularMoment',
-  toastr,
-  'ui.ace',
-  ngUpload,
   'angularResizable',
   vsRepeat,
-  'ui.sortable',
 ];
 
 const ngModule = angular.module('app', requirements);
-
-dashboardGridOptions(ngModule);
 
 function registerAll(context) {
   const modules = context
@@ -101,7 +108,7 @@ function registerVisualizations() {
 }
 
 function registerPages() {
-  const context = require.context('@/pages', true, /^((?![\\/.]test[\\./]).)*\.js$/);
+  const context = require.context('@/pages', true, /^((?![\\/.]test[\\./]).)*\.jsx?$/);
   const routesCollection = registerAll(context);
   routesCollection.forEach((routes) => {
     ngModule.config(($routeProvider) => {
@@ -110,11 +117,7 @@ function registerPages() {
         route.authenticated = true;
         route.resolve = extend(
           {
-            __organizationStatus: (OrganizationStatus) => {
-              'ngInject';
-
-              return OrganizationStatus.refresh();
-            },
+            __organizationStatus: () => organizationStatus.refresh(),
           },
           route.resolve,
         );
@@ -152,5 +155,9 @@ registerComponents();
 registerPages();
 registerExtensions();
 registerVisualizations(ngModule);
+
+ngModule.run(($q) => {
+  DialogWrapper.Promise = $q;
+});
 
 export default ngModule;

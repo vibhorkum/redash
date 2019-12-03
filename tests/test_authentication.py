@@ -127,16 +127,29 @@ class TestHMACAuthentication(BaseTestCase):
             self.assertEqual(user.id, hmac_load_user_from_request(request).id)
 
 
+class TestSessionAuthentication(BaseTestCase):
+    def test_prefers_api_key_over_session_user_id(self):
+        user = self.factory.create_user()
+        query = self.factory.create_query(user=user)
+
+        other_org = self.factory.create_org()
+        other_user = self.factory.create_user(org=other_org)
+        models.db.session.flush()
+
+        rv = self.make_request('get', '/api/queries/{}?api_key={}'.format(query.id, query.api_key), user=other_user)
+        self.assertEqual(rv.status_code, 200)
+
+
 class TestCreateAndLoginUser(BaseTestCase):
     def test_logins_valid_user(self):
-        user = self.factory.create_user(email=u'test@example.com')
+        user = self.factory.create_user(email='test@example.com')
 
         with patch('redash.authentication.login_user') as login_user_mock:
             create_and_login_user(self.factory.org, user.name, user.email)
             login_user_mock.assert_called_once_with(user, remember=True)
 
     def test_creates_vaild_new_user(self):
-        email = u'test@example.com'
+        email = 'test@example.com'
         name = 'Test User'
 
         with patch('redash.authentication.login_user') as login_user_mock:
@@ -147,7 +160,7 @@ class TestCreateAndLoginUser(BaseTestCase):
             self.assertEqual(user.email, email)
 
     def test_updates_user_name(self):
-        user = self.factory.create_user(email=u'test@example.com')
+        user = self.factory.create_user(email='test@example.com')
 
         with patch('redash.authentication.login_user') as login_user_mock:
             create_and_login_user(self.factory.org, "New Name", user.email)
@@ -156,16 +169,16 @@ class TestCreateAndLoginUser(BaseTestCase):
 
 class TestVerifyProfile(BaseTestCase):
     def test_no_domain_allowed_for_org(self):
-        profile = dict(email=u'arik@example.com')
+        profile = dict(email='arik@example.com')
         self.assertFalse(verify_profile(self.factory.org, profile))
 
     def test_domain_not_in_org_domains_list(self):
-        profile = dict(email=u'arik@example.com')
+        profile = dict(email='arik@example.com')
         self.factory.org.settings[models.Organization.SETTING_GOOGLE_APPS_DOMAINS] = ['example.org']
         self.assertFalse(verify_profile(self.factory.org, profile))
 
     def test_domain_in_org_domains_list(self):
-        profile = dict(email=u'arik@example.com')
+        profile = dict(email='arik@example.com')
         self.factory.org.settings[models.Organization.SETTING_GOOGLE_APPS_DOMAINS] = ['example.com']
         self.assertTrue(verify_profile(self.factory.org, profile))
 
@@ -173,14 +186,14 @@ class TestVerifyProfile(BaseTestCase):
         self.assertTrue(verify_profile(self.factory.org, profile))
 
     def test_org_in_public_mode_accepts_any_domain(self):
-        profile = dict(email=u'arik@example.com')
+        profile = dict(email='arik@example.com')
         self.factory.org.settings[models.Organization.SETTING_IS_PUBLIC] = True
         self.factory.org.settings[models.Organization.SETTING_GOOGLE_APPS_DOMAINS] = []
         self.assertTrue(verify_profile(self.factory.org, profile))
 
     def test_user_not_in_domain_but_account_exists(self):
-        profile = dict(email=u'arik@example.com')
-        self.factory.create_user(email=u'arik@example.com')
+        profile = dict(email='arik@example.com')
+        self.factory.create_user(email='arik@example.com')
         self.factory.org.settings[models.Organization.SETTING_GOOGLE_APPS_DOMAINS] = ['example.org']
         self.assertTrue(verify_profile(self.factory.org, profile))
 
@@ -207,15 +220,15 @@ class TestRedirectToUrlAfterLoggingIn(BaseTestCase):
 
     def test_simple_path_in_next_param(self):
         response = self.post_request('/login?next=queries', data={'email': self.user.email, 'password': self.password}, org=self.factory.org)
-        self.assertEqual(response.location, 'http://localhost/queries')
+        self.assertEqual(response.location, 'http://localhost/default/queries')
 
     def test_starts_scheme_url_in_next_param(self):
         response = self.post_request('/login?next=https://redash.io', data={'email': self.user.email, 'password': self.password}, org=self.factory.org)
-        self.assertEqual(response.location, 'http://localhost/')
+        self.assertEqual(response.location, 'http://localhost/default/')
 
     def test_without_scheme_url_in_next_param(self):
         response = self.post_request('/login?next=//redash.io', data={'email': self.user.email, 'password': self.password}, org=self.factory.org)
-        self.assertEqual(response.location, 'http://localhost/')
+        self.assertEqual(response.location, 'http://localhost/default/')
 
     def test_without_scheme_with_path_url_in_next_param(self):
         response = self.post_request('/login?next=//localhost/queries', data={'email': self.user.email, 'password': self.password}, org=self.factory.org)
@@ -266,7 +279,7 @@ class TestRemoteUserAuth(BaseTestCase):
         self.assertEqual(user.email, email)
         self.assertEqual(user.name, name)
         self.assertEqual(user.org, org or self.factory.org)
-        self.assertItemsEqual(user.group_ids, groups)
+        self.assertCountEqual(user.group_ids, groups)
 
     def get_test_user(self, email='test@example.com', org=None):
         """Helper to fetch an user from the database."""
@@ -306,3 +319,26 @@ class TestRemoteUserAuth(BaseTestCase):
         })
 
         self.assert_correct_user_attributes(self.get_test_user())
+
+
+class TestUserForgotPassword(BaseTestCase):
+    def test_user_should_receive_password_reset_link(self):
+        user = self.factory.create_user()
+
+        with patch('redash.handlers.authentication.send_password_reset_email') as send_password_reset_email_mock:
+            response = self.post_request('/forgot', org=user.org, data={'email': user.email})
+            self.assertEqual(response.status_code, 200)
+            send_password_reset_email_mock.assert_called_with(user)
+
+    def test_disabled_user_should_not_receive_password_reset_link(self):
+        user = self.factory.create_user()
+        user.disable()
+        self.db.session.add(user)
+        self.db.session.commit()
+
+        with patch('redash.handlers.authentication.send_password_reset_email') as send_password_reset_email_mock,\
+                patch('redash.handlers.authentication.send_user_disabled_email') as send_user_disabled_email_mock:
+            response = self.post_request('/forgot', org=user.org, data={'email': user.email})
+            self.assertEqual(response.status_code, 200)
+            send_password_reset_email_mock.assert_not_called()
+            send_user_disabled_email_mock.assert_called_with(user)

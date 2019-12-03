@@ -36,11 +36,13 @@ class CustomPrint(object):
 
 
 class Python(BaseQueryRunner):
+    should_annotate_query = False
+
     safe_builtins = (
-        'sorted', 'reversed', 'map', 'reduce', 'any', 'all',
+        'sorted', 'reversed', 'map', 'any', 'all',
         'slice', 'filter', 'len', 'next', 'enumerate',
-        'sum', 'abs', 'min', 'max', 'round', 'cmp', 'divmod',
-        'str', 'unicode', 'int', 'float', 'complex',
+        'sum', 'abs', 'min', 'max', 'round', 'divmod',
+        'str', 'int', 'float', 'complex',
         'tuple', 'set', 'list', 'dict', 'bool',
     )
 
@@ -62,10 +64,6 @@ class Python(BaseQueryRunner):
     @classmethod
     def enabled(cls):
         return True
-
-    @classmethod
-    def annotate_query(cls):
-        return False
 
     def __init__(self, configuration):
         super(Python, self).__init__(configuration)
@@ -209,7 +207,7 @@ class Python(BaseQueryRunner):
         if query.latest_query_data.data is None:
             raise Exception("Query does not have results yet.")
 
-        return json_loads(query.latest_query_data.data)
+        return query.latest_query_data.data
 
     def get_current_user(self):
         return self._current_user.to_dict()
@@ -259,12 +257,11 @@ class Python(BaseQueryRunner):
             restricted_globals["TYPE_DATE"] = TYPE_DATE
             restricted_globals["TYPE_FLOAT"] = TYPE_FLOAT
 
-
             # TODO: Figure out the best way to have a timeout on a script
             #       One option is to use ETA with Celery + timeouts on workers
             #       And replacement of worker process every X requests handled.
 
-            exec((code), restricted_globals, self._script_locals)
+            exec(code, restricted_globals, self._script_locals)
 
             result = self._script_locals['result']
             result['log'] = self._custom_print.lines

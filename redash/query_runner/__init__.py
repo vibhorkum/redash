@@ -3,6 +3,8 @@ import logging
 from dateutil import parser
 import requests
 
+from six import text_type
+
 from redash import settings
 from redash.utils import json_loads
 
@@ -53,6 +55,8 @@ class NotSupported(Exception):
 
 
 class BaseQueryRunner(object):
+    deprecated = False
+    should_annotate_query = True
     noop_query = None
 
     def __init__(self, configuration):
@@ -72,12 +76,16 @@ class BaseQueryRunner(object):
         return True
 
     @classmethod
-    def annotate_query(cls):
-        return True
-
-    @classmethod
     def configuration_schema(cls):
         return {}
+
+    def annotate_query(self, query, metadata):
+        if not self.should_annotate_query:
+            return query
+
+        annotation = ", ".join(["{}: {}".format(k, v) for k, v in metadata.items()])
+        annotated_query = "/* {} */ {}".format(annotation, query)
+        return annotated_query
 
     def test_connection(self):
         if self.noop_query is None:
@@ -134,7 +142,7 @@ class BaseSQLQueryRunner(BaseQueryRunner):
         self._get_tables(schema_dict)
         if settings.SCHEMA_RUN_TABLE_SIZE_CALCULATIONS and get_stats:
             self._get_tables_stats(schema_dict)
-        return schema_dict.values()
+        return list(schema_dict.values())
 
     def _get_tables(self, schema_dict):
         return []
@@ -147,6 +155,7 @@ class BaseSQLQueryRunner(BaseQueryRunner):
 
 
 class BaseHTTPQueryRunner(BaseQueryRunner):
+    should_annotate_query = False
     response_error = "Endpoint returned unexpected status code"
     requires_authentication = False
     requires_url = True
@@ -271,7 +280,18 @@ def import_query_runners(query_runner_imports):
         __import__(runner_import)
 
 
-def guess_type(string_value):
+def guess_type(value):
+    if isinstance(value, bool):
+        return TYPE_BOOLEAN
+    elif isinstance(value, int):
+        return TYPE_INTEGER
+    elif isinstance(value, float):
+        return TYPE_FLOAT
+
+    return guess_type_from_string(value)
+
+
+def guess_type_from_string(string_value):
     if string_value == '' or string_value is None:
         return TYPE_STRING
 
@@ -287,7 +307,7 @@ def guess_type(string_value):
     except (ValueError, OverflowError):
         pass
 
-    if unicode(string_value).lower() in ('true', 'false'):
+    if text_type(string_value).lower() in ('true', 'false'):
         return TYPE_BOOLEAN
 
     try:

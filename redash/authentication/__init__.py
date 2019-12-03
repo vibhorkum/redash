@@ -2,7 +2,7 @@ import hashlib
 import hmac
 import logging
 import time
-from urlparse import urlsplit, urlunsplit
+from urllib.parse import urlsplit, urlunsplit
 
 from flask import jsonify, redirect, request, url_for
 from flask_login import LoginManager, login_user, logout_user, user_logged_in
@@ -33,44 +33,28 @@ def sign(key, path, expires):
     if not key:
         return None
 
-    h = hmac.new(str(key), msg=path, digestmod=hashlib.sha1)
-    h.update(str(expires))
+    h = hmac.new(key.encode(), msg=path.encode(), digestmod=hashlib.sha1)
+    h.update(str(expires).encode())
 
     return h.hexdigest()
 
 
 @login_manager.user_loader
 def load_user(user_id_with_identity):
+    user = api_key_load_user_from_request(request)
+    if user:
+        return user
+
     org = current_org._get_current_object()
 
-    '''
-    Users who logged in prior to https://github.com/getredash/redash/pull/3174 going live are going
-    to have their (integer) user_id as their session user identifier.
-    These session user identifiers will be updated the first time they visit any page so we add special
-    logic to allow a frictionless transition.
-    This logic will be removed 2-4 weeks after going live, and users who haven't
-    visited any page during that time will simply have to log in again.
-    '''
-
-    is_legacy_session_identifier = str(user_id_with_identity).find('-') < 0
-
-    if is_legacy_session_identifier:
-        user_id = user_id_with_identity
-    else:
-        user_id, _ = user_id_with_identity.split("-")
-
     try:
+        user_id, _ = user_id_with_identity.split("-")
         user = models.User.get_by_id_and_org(user_id, org)
-        if user.is_disabled:
-            return None
-
-        if is_legacy_session_identifier:
-            login_user(user, remember=True)
-        elif user.get_id() != user_id_with_identity:
+        if user.is_disabled or user.get_id() != user_id_with_identity:
             return None
 
         return user
-    except models.NoResultFound:
+    except (models.NoResultFound, ValueError, AttributeError):
         return None
 
 
@@ -109,7 +93,7 @@ def hmac_load_user_from_request(request):
             calculated_signature = sign(query.api_key, request.path, expires)
 
             if query.api_key and signature == calculated_signature:
-                return models.ApiUser(query.api_key, query.org, query.groups.keys(), name="ApiKey: Query {}".format(query.id))
+                return models.ApiUser(query.api_key, query.org, list(query.groups.keys()), name="ApiKey: Query {}".format(query.id))
 
     return None
 
@@ -134,7 +118,7 @@ def get_user_from_api_key(api_key, query_id):
             if query_id:
                 query = models.Query.get_by_id_and_org(query_id, org)
                 if query and query.api_key == api_key:
-                    user = models.ApiUser(api_key, query.org, query.groups.keys(), name="ApiKey: Query {}".format(query.id))
+                    user = models.ApiUser(api_key, query.org, list(query.groups.keys()), name="ApiKey: Query {}".format(query.id))
 
     return user
 
@@ -244,7 +228,6 @@ def init_app(app):
     login_manager.init_app(app)
     login_manager.anonymous_user = models.AnonymousUser
 
-    app.secret_key = settings.COOKIE_SECRET
     app.register_blueprint(google_oauth.blueprint)
     app.register_blueprint(saml_auth.blueprint)
     app.register_blueprint(remote_user_auth.blueprint)
@@ -287,5 +270,11 @@ def get_next_path(unsafe_next_path):
     parts[0] = ''  # clear scheme
     parts[1] = ''  # clear netloc
     safe_next_path = urlunsplit(parts)
+
+    # If the original path was a URL, we might end up with an empty
+    # safe url, which will redirect to the login page. Changing to 
+    # relative root to redirect to the app root after login.
+    if not safe_next_path:
+        safe_next_path = './'
 
     return safe_next_path

@@ -1,24 +1,27 @@
 import * as _ from 'lodash';
 import PromiseRejectionError from '@/lib/promise-rejection-error';
 import getTags from '@/services/getTags';
+import { policy } from '@/services/policy';
+import {
+  editableMappingsToParameterMappings,
+  synchronizeWidgetTitles,
+} from '@/components/ParameterMappingInput';
+import { collectDashboardFilters } from '@/services/dashboard';
 import { durationHumanize } from '@/filters';
 import template from './dashboard.html';
-import shareDashboardTemplate from './share-dashboard.html';
+import ShareDashboardDialog from './ShareDashboardDialog';
+import AddWidgetDialog from '@/components/dashboards/AddWidgetDialog';
+import TextboxDialog from '@/components/dashboards/TextboxDialog';
+import PermissionsEditorDialog from '@/components/permissions-editor/PermissionsEditorDialog';
+import notification from '@/services/notification';
+
 import './dashboard.less';
 
-function isWidgetPositionChanged(oldPosition, newPosition) {
-  const fields = ['col', 'row', 'sizeX', 'sizeY', 'autoHeight'];
-  oldPosition = _.pick(oldPosition, fields);
-  newPosition = _.pick(newPosition, fields);
-  return !!_.find(fields, key => newPosition[key] !== oldPosition[key]);
-}
-
-function getWidgetsWithChangedPositions(widgets) {
-  return _.filter(widgets, (widget) => {
-    if (!_.isObject(widget.$originalPosition)) {
-      return true;
-    }
-    return isWidgetPositionChanged(widget.$originalPosition, widget.options.position);
+function getChangedPositions(widgets, nextPositions = {}) {
+  return _.pickBy(nextPositions, (nextPos, widgetId) => {
+    const widget = _.find(widgets, { id: Number(widgetId) });
+    const prevPos = widget.options.position;
+    return !_.isMatch(prevPos, nextPos);
   });
 }
 
@@ -35,47 +38,74 @@ function DashboardCtrl(
   currentUser,
   clientConfig,
   Events,
-  toastr,
-  Policy,
 ) {
-  this.saveInProgress = false;
+  let recentPositions = [];
 
-  const saveDashboardLayout = (widgets) => {
+  const saveDashboardLayout = (changedPositions) => {
     if (!this.dashboard.canEdit()) {
       return;
     }
 
     this.saveInProgress = true;
-    const showMessages = true;
+
+    const saveChangedWidgets = _.map(changedPositions, (position, id) => {
+      // find widget
+      const widget = _.find(this.dashboard.widgets, { id: Number(id) });
+
+      // skip already deleted widget
+      if (!widget) {
+        return Promise.resolve();
+      }
+
+      return widget.save('options', { position });
+    });
+
     return $q
-      .all(_.map(widgets, widget => widget.save()))
+      .all(saveChangedWidgets)
       .then(() => {
-        if (showMessages) {
-          toastr.success('Changes saved.');
+        this.isLayoutDirty = false;
+        if (this.editBtnClickedWhileSaving) {
+          this.layoutEditing = false;
         }
-        // Update original widgets positions
-        _.each(widgets, (widget) => {
-          _.extend(widget.$originalPosition, widget.options.position);
-        });
       })
       .catch(() => {
-        if (showMessages) {
-          toastr.error('Error saving changes.');
-        }
+        notification.error('Error saving changes.');
       })
       .finally(() => {
         this.saveInProgress = false;
+        this.editBtnClickedWhileSaving = false;
+        $scope.$applyAsync();
       });
   };
 
+  const saveDashboardLayoutDebounced = (...args) => {
+    this.saveDelay = true;
+    return _.debounce(() => {
+      this.saveDelay = false;
+      saveDashboardLayout(...args);
+    }, 2000)();
+  };
+
+  this.retrySaveDashboardLayout = () => {
+    this.onLayoutChange(recentPositions);
+  };
+
+  // grid vars
+  this.saveDelay = false;
+  this.saveInProgress = false;
+  this.recentLayoutPositions = {};
+  this.editBtnClickedWhileSaving = false;
   this.layoutEditing = false;
+  this.isLayoutDirty = false;
+  this.isGridDisabled = false;
+
+  // dashboard vars
   this.isFullscreen = false;
   this.refreshRate = null;
-  this.isGridDisabled = false;
-  this.updateGridItems = null;
   this.showPermissionsControl = clientConfig.showPermissionsControl;
   this.globalParameters = [];
   this.isDashboardOwner = false;
+  this.filters = [];
 
   this.refreshRates = clientConfig.dashboardRefreshIntervals.map(interval => ({
     name: durationHumanize(interval),
@@ -83,7 +113,7 @@ function DashboardCtrl(
     enabled: true,
   }));
 
-  const allowedIntervals = Policy.getDashboardRefreshIntervals();
+  const allowedIntervals = policy.getDashboardRefreshIntervals();
   if (_.isArray(allowedIntervals)) {
     _.each(this.refreshRates, (rate) => {
       rate.enabled = allowedIntervals.indexOf(rate.rate) >= 0;
@@ -104,49 +134,36 @@ function DashboardCtrl(
     this.globalParameters = this.dashboard.getParametersDefs();
   };
 
-  $scope.$on('dashboard.update-parameters', () => {
-    this.extractGlobalParameters();
-  });
+  // ANGULAR_REMOVE_ME This forces Widgets re-rendering
+  // use state when Dashboard is migrated to React
+  this.forceDashboardGridReload = () => {
+    this.dashboard.widgets = [...this.dashboard.widgets];
+  };
 
-  const collectFilters = (dashboard, forceRefresh) => {
-    const queryResultPromises = _.compact(this.dashboard.widgets.map((widget) => {
-      widget.getParametersDefs(); // Force widget to read parameters values from URL
-      return widget.load(forceRefresh);
-    }));
+  this.loadWidget = (widget, forceRefresh = false) => {
+    widget.getParametersDefs(); // Force widget to read parameters values from URL
+    this.forceDashboardGridReload();
+    return widget.load(forceRefresh).finally(this.forceDashboardGridReload);
+  };
 
-    $q.all(queryResultPromises).then((queryResults) => {
-      const filters = {};
-      queryResults.forEach((queryResult) => {
-        const queryFilters = queryResult.getFilters();
-        queryFilters.forEach((queryFilter) => {
-          const hasQueryStringValue = _.has($location.search(), queryFilter.name);
+  this.refreshWidget = widget => this.loadWidget(widget, true);
 
-          if (!(hasQueryStringValue || dashboard.dashboard_filters_enabled)) {
-            // If dashboard filters not enabled, or no query string value given,
-            // skip filters linking.
-            return;
-          }
+  const collectFilters = (dashboard, forceRefresh, updatedParameters = []) => {
+    const affectedWidgets = updatedParameters.length > 0 ? this.dashboard.widgets.filter(
+      widget => Object.values(widget.getParameterMappings()).filter(
+        ({ type }) => type === 'dashboard-level',
+      ).some(
+        ({ mapTo }) => _.includes(updatedParameters.map(p => p.name), mapTo),
+      ),
+    ) : this.dashboard.widgets;
 
-          if (hasQueryStringValue) {
-            queryFilter.current = $location.search()[queryFilter.name];
-          }
+    const queryResultPromises = _.compact(affectedWidgets.map(widget => this.loadWidget(widget, forceRefresh)));
 
-          if (!_.has(filters, queryFilter.name)) {
-            const filter = _.extend({}, queryFilter);
-            filters[filter.name] = filter;
-            filters[filter.name].originFilters = [];
-          }
-
-          // TODO: merge values.
-          filters[queryFilter.name].originFilters.push(queryFilter);
-        });
-      });
-
-      this.filters = _.values(filters);
-      this.filtersOnChange = (filter) => {
-        _.each(filter.originFilters, (originFilter) => {
-          originFilter.current = filter.current;
-        });
+    return $q.all(queryResultPromises).then((queryResults) => {
+      this.filters = collectDashboardFilters(dashboard, queryResults, $location.search());
+      this.filtersOnChange = (allFilters) => {
+        this.filters = allFilters;
+        $scope.$applyAsync();
       };
     });
   };
@@ -201,8 +218,11 @@ function DashboardCtrl(
 
   this.loadDashboard();
 
-  this.refreshDashboard = () => {
-    renderDashboard(this.dashboard, true);
+  this.refreshDashboard = (parameters) => {
+    this.refreshInProgress = true;
+    collectFilters(this.dashboard, true, parameters).finally(() => {
+      this.refreshInProgress = false;
+    });
   };
 
   this.autoRefresh = () => {
@@ -214,7 +234,13 @@ function DashboardCtrl(
   this.archiveDashboard = () => {
     const archive = () => {
       Events.record('archive', 'dashboard', this.dashboard.id);
-      this.dashboard.$delete();
+      // this API call will not modify widgets, but will reload them, so they will
+      // loose their internal state. So we'll save widgets before doing API call and
+      // restore them after.
+      const widgets = this.dashboard.widgets;
+      this.dashboard.$delete().then(() => {
+        this.dashboard.widgets = widgets;
+      });
     };
 
     const title = 'Archive Dashboard';
@@ -225,37 +251,43 @@ function DashboardCtrl(
   };
 
   this.showManagePermissionsModal = () => {
-    $uibModal.open({
-      component: 'permissionsEditor',
-      resolve: {
-        aclUrl: { url: `api/dashboards/${this.dashboard.id}/acl` },
-        owner: this.dashboard.user,
-      },
+    const aclUrl = `api/dashboards/${this.dashboard.id}/acl`;
+    PermissionsEditorDialog.showModal({
+      aclUrl,
+      context: 'dashboard',
+      author: this.dashboard.user,
     });
   };
 
-  this.editLayout = (enableEditing, applyChanges) => {
-    if (!this.isGridDisabled) {
-      if (!enableEditing) {
-        if (applyChanges) {
-          const changedWidgets = getWidgetsWithChangedPositions(this.dashboard.widgets);
-          saveDashboardLayout(changedWidgets);
-        } else {
-          // Revert changes
-          const items = {};
-          _.each(this.dashboard.widgets, (widget) => {
-            _.extend(widget.options.position, widget.$originalPosition);
-            items[widget.id] = widget.options.position;
-          });
-          this.dashboard.widgets = Dashboard.prepareWidgetsForDashboard(this.dashboard.widgets);
-          if (this.updateGridItems) {
-            this.updateGridItems(items);
-          }
-        }
-      }
+  this.onLayoutChange = (positions) => {
+    recentPositions = positions; // required for retry if subsequent save fails
 
-      this.layoutEditing = enableEditing;
+    // determine position changes
+    const changedPositions = getChangedPositions(this.dashboard.widgets, positions);
+    if (_.isEmpty(changedPositions)) {
+      this.isLayoutDirty = false;
+      $scope.$applyAsync();
+      return;
     }
+
+    this.isLayoutDirty = true;
+    $scope.$applyAsync();
+
+    // debounce in edit mode, immediate in preview
+    if (this.layoutEditing) {
+      saveDashboardLayoutDebounced(changedPositions);
+    } else {
+      saveDashboardLayout(changedPositions);
+    }
+  };
+
+  this.onBreakpointChanged = (isSingleCol) => {
+    this.isGridDisabled = isSingleCol;
+    $scope.$applyAsync();
+  };
+
+  this.editLayout = (isEditing) => {
+    this.layoutEditing = isEditing;
   };
 
   this.loadTags = () => getTags('api/dashboards/tags').then(tags => _.map(tags, t => t.name));
@@ -273,12 +305,12 @@ function DashboardCtrl(
       },
       (error) => {
         if (error.status === 403) {
-          toastr.error('Dashboard update failed: Permission Denied.');
+          notification.error('Dashboard update failed', 'Permission Denied.');
         } else if (error.status === 409) {
-          toastr.error(
-            'It seems like the dashboard has been modified by another user. ' +
+          notification.error(
+            'It seems like the dashboard has been modified by another user. ',
             'Please copy/backup your changes and reload this page.',
-            { autoDismiss: false },
+            { duration: null },
           );
         }
       },
@@ -295,61 +327,49 @@ function DashboardCtrl(
 
   this.updateDashboardFiltersState = () => {
     collectFilters(this.dashboard, false);
-    Dashboard.save(
-      {
-        slug: this.dashboard.id,
-        version: this.dashboard.version,
-        dashboard_filters_enabled: this.dashboard.dashboard_filters_enabled,
-      },
-      (dashboard) => {
-        this.dashboard = dashboard;
-      },
-      (error) => {
-        if (error.status === 403) {
-          toastr.error('Name update failed: Permission denied.');
-        } else if (error.status === 409) {
-          toastr.error(
-            'It seems like the dashboard has been modified by another user. ' +
-              'Please copy/backup your changes and reload this page.',
-            { autoDismiss: false },
-          );
-        }
-      },
-    );
+    updateDashboard({
+      dashboard_filters_enabled: this.dashboard.dashboard_filters_enabled,
+    });
   };
 
-  this.addWidget = (widgetType) => {
-    const widgetTypes = {
-      textbox: 'addTextboxDialog',
-      widget: 'addWidgetDialog',
-    };
-    $uibModal
-      .open({
-        component: widgetTypes[widgetType],
-        resolve: {
-          dashboard: () => this.dashboard,
-        },
-      })
-      .result.then(() => {
-        this.extractGlobalParameters();
-        // Save position of newly added widget (but not entire layout)
-        const widget = _.last(this.dashboard.widgets);
-        if (_.isObject(widget)) {
-          return widget.save();
-        }
-      });
+  this.showAddTextboxDialog = () => {
+    TextboxDialog.showModal({
+      dashboard: this.dashboard,
+      onConfirm: text => this.dashboard.addWidget(text).then(this.onWidgetAdded),
+    });
+  };
+
+  this.showAddWidgetDialog = () => {
+    AddWidgetDialog.showModal({
+      dashboard: this.dashboard,
+      onConfirm: (visualization, parameterMappings) => this.dashboard.addWidget(visualization, {
+        parameterMappings: editableMappingsToParameterMappings(parameterMappings),
+      }).then((widget) => {
+        const widgetsToSave = [
+          widget,
+          ...synchronizeWidgetTitles(widget.options.parameterMappings, this.dashboard.widgets),
+        ];
+        return Promise.all(widgetsToSave.map(w => w.save())).then(this.onWidgetAdded);
+      }),
+    });
+  };
+
+  this.onWidgetAdded = () => {
+    this.extractGlobalParameters();
+    collectFilters(this.dashboard, false);
+    // Save position of newly added widget (but not entire layout)
+    const widget = _.last(this.dashboard.widgets);
+    if (_.isObject(widget)) {
+      return widget.save();
+    }
+    $scope.$applyAsync();
   };
 
   this.removeWidget = (widgetId) => {
     this.dashboard.widgets = this.dashboard.widgets.filter(w => w.id !== undefined && w.id !== widgetId);
     this.extractGlobalParameters();
-    if (!this.layoutEditing) {
-      // We need to wait a bit while `angular` updates widgets, and only then save new layout
-      $timeout(() => {
-        const changedWidgets = getWidgetsWithChangedPositions(this.dashboard.widgets);
-        saveDashboardLayout(changedWidgets);
-      }, 50);
-    }
+    collectFilters(this.dashboard, false);
+    $scope.$applyAsync();
   };
 
   this.toggleFullscreen = () => {
@@ -385,60 +405,19 @@ function DashboardCtrl(
   }
 
   this.openShareForm = () => {
-    $uibModal.open({
-      component: 'shareDashboard',
-      resolve: {
-        dashboard: this.dashboard,
-      },
+    const hasOnlySafeQueries = _.every(
+      this.dashboard.widgets,
+      w => (w.getQuery() ? w.getQuery().is_safe : true),
+    );
+
+    ShareDashboardDialog.showModal({
+      dashboard: this.dashboard,
+      hasOnlySafeQueries,
     });
   };
 }
 
-const ShareDashboardComponent = {
-  template: shareDashboardTemplate,
-  bindings: {
-    resolve: '<',
-    close: '&',
-    dismiss: '&',
-  },
-  controller($http) {
-    'ngInject';
-
-    this.dashboard = this.resolve.dashboard;
-
-    this.toggleSharing = () => {
-      const url = `api/dashboards/${this.dashboard.id}/share`;
-
-      if (!this.dashboard.publicAccessEnabled) {
-        // disable
-        $http
-          .delete(url)
-          .success(() => {
-            this.dashboard.publicAccessEnabled = false;
-            delete this.dashboard.public_url;
-          })
-          .error(() => {
-            this.dashboard.publicAccessEnabled = true;
-            // TODO: show message
-          });
-      } else {
-        $http
-          .post(url)
-          .success((data) => {
-            this.dashboard.publicAccessEnabled = true;
-            this.dashboard.public_url = data.public_url;
-          })
-          .error(() => {
-            this.dashboard.publicAccessEnabled = false;
-            // TODO: show message
-          });
-      }
-    };
-  },
-};
-
 export default function init(ngModule) {
-  ngModule.component('shareDashboard', ShareDashboardComponent);
   ngModule.component('dashboardPage', {
     template,
     controller: DashboardCtrl,
@@ -453,4 +432,3 @@ export default function init(ngModule) {
 }
 
 init.init = true;
-

@@ -1,4 +1,4 @@
-import { find, isFunction } from 'lodash';
+import { find, isArray, map, intersection, isEqual } from 'lodash';
 import React from 'react';
 import PropTypes from 'prop-types';
 import { react2angular } from 'react2angular';
@@ -6,46 +6,11 @@ import Select from 'antd/lib/select';
 
 const { Option } = Select;
 
-function optionsFromQueryResult(queryResult) {
-  const columns = queryResult.data.columns;
-  const numColumns = columns.length;
-  let options = [];
-  // If there are multiple columns, check if there is a column
-  // named 'name' and column named 'value'. If name column is present
-  // in results, use name from name column. Similar for value column.
-  // Default: Use first string column for name and value.
-  if (numColumns > 0) {
-    let nameColumn = null;
-    let valueColumn = null;
-    columns.forEach((column) => {
-      const columnName = column.name.toLowerCase();
-      if (columnName === 'name') {
-        nameColumn = column.name;
-      }
-      if (columnName === 'value') {
-        valueColumn = column.name;
-      }
-      // Assign first string column as name and value column.
-      if (nameColumn === null) {
-        nameColumn = column.name;
-      }
-      if (valueColumn === null) {
-        valueColumn = column.name;
-      }
-    });
-    if (nameColumn !== null && valueColumn !== null) {
-      options = queryResult.data.rows.map(row => ({
-        name: row[nameColumn],
-        value: row[valueColumn],
-      }));
-    }
-  }
-  return options;
-}
-
 export class QueryBasedParameterInput extends React.Component {
   static propTypes = {
+    parameter: PropTypes.any, // eslint-disable-line react/forbid-prop-types
     value: PropTypes.any, // eslint-disable-line react/forbid-prop-types
+    mode: PropTypes.oneOf(['default', 'multiple']),
     queryId: PropTypes.number,
     onSelect: PropTypes.func,
     className: PropTypes.string,
@@ -53,6 +18,8 @@ export class QueryBasedParameterInput extends React.Component {
 
   static defaultProps = {
     value: null,
+    mode: 'default',
+    parameter: null,
     queryId: null,
     onSelect: () => {},
     className: '',
@@ -62,6 +29,7 @@ export class QueryBasedParameterInput extends React.Component {
     super(props);
     this.state = {
       options: [],
+      value: null,
       loading: false,
     };
   }
@@ -70,33 +38,49 @@ export class QueryBasedParameterInput extends React.Component {
     this._loadOptions(this.props.queryId);
   }
 
-  // eslint-disable-next-line no-unused-vars
-  componentWillReceiveProps(nextProps) {
-    if (nextProps.queryId !== this.props.queryId) {
-      this._loadOptions(nextProps.queryId, nextProps.value);
+  componentDidUpdate(prevProps) {
+    if (this.props.queryId !== prevProps.queryId) {
+      this._loadOptions(this.props.queryId);
+    }
+    if (this.props.value !== prevProps.value) {
+      this.setValue(this.props.value);
     }
   }
 
-  _loadOptions(queryId) {
-    if (queryId && (queryId !== this.state.queryId)) {
-      const Query = this.props.Query; // eslint-disable-line react/prop-types
-      this.setState({ loading: true });
-      Query.resultById({ id: queryId }, (result) => {
-        if (this.props.queryId === queryId) {
-          const options = optionsFromQueryResult(result.query_result);
-          this.setState({ options, loading: false });
+  setValue(value) {
+    const { options } = this.state;
+    if (this.props.mode === 'multiple') {
+      value = isArray(value) ? value : [value];
+      const optionValues = map(options, option => option.value);
+      const validValues = intersection(value, optionValues);
+      this.setState({ value: validValues });
+      return validValues;
+    }
+    const found = find(options, option => option.value === this.props.value) !== undefined;
+    value = found ? value : options[0].value;
+    this.setState({ value });
+    return value;
+  }
 
-          const found = find(options, option => option.value === this.props.value) !== undefined;
-          if (!found && isFunction(this.props.onSelect)) {
-            this.props.onSelect(options[0].value);
+  async _loadOptions(queryId) {
+    if (queryId && (queryId !== this.state.queryId)) {
+      this.setState({ loading: true });
+      const options = await this.props.parameter.loadDropdownValues();
+
+      // stale queryId check
+      if (this.props.queryId === queryId) {
+        this.setState({ options, loading: false }, () => {
+          const updatedValue = this.setValue(this.props.value);
+          if (!isEqual(updatedValue, this.props.value)) {
+            this.props.onSelect(updatedValue);
           }
-        }
-      });
+        });
+      }
     }
   }
 
   render() {
-    const { className, value, onSelect } = this.props;
+    const { className, value, mode, onSelect, ...otherProps } = this.props;
     const { loading, options } = this.state;
     return (
       <span>
@@ -104,10 +88,15 @@ export class QueryBasedParameterInput extends React.Component {
           className={className}
           disabled={loading || (options.length === 0)}
           loading={loading}
-          defaultValue={value}
+          mode={mode}
+          value={this.state.value}
           onChange={onSelect}
           dropdownMatchSelectWidth={false}
-          dropdownClassName="ant-dropdown-in-bootstrap-modal"
+          optionFilterProp="children"
+          showSearch
+          showArrow
+          notFoundContent={null}
+          {...otherProps}
         >
           {options.map(option => (<Option value={option.value} key={option.value}>{option.name}</Option>))}
         </Select>
@@ -117,7 +106,7 @@ export class QueryBasedParameterInput extends React.Component {
 }
 
 export default function init(ngModule) {
-  ngModule.component('queryBasedParameterInput', react2angular(QueryBasedParameterInput, null, ['Query']));
+  ngModule.component('queryBasedParameterInput', react2angular(QueryBasedParameterInput));
 }
 
 init.init = true;

@@ -12,7 +12,7 @@ except ImportError:
 class PagerDuty(BaseDestination):
 
     KEY_STRING = '{alert_id}_{query_id}'
-    DESCRIPTION_STR = 'Alert - Redash Query #{query_id}: {query_name}'
+    DESCRIPTION_STR = 'Alert: {alert_name}'
 
     @classmethod
     def enabled(cls):
@@ -29,7 +29,7 @@ class PagerDuty(BaseDestination):
                 },
                 'description': {
                     'type': 'string',
-                    'title': 'Description for the event, defaults to query',
+                    'title': 'Description for the event, defaults to alert name',
                 }
             },
             "required": ["integration_key"]
@@ -41,10 +41,12 @@ class PagerDuty(BaseDestination):
 
     def notify(self, alert, query, user, new_state, app, host, options):
 
-        default_desc = self.DESCRIPTION_STR.format(query_id=query.id, query_name=query.name)
-
-        if options.get('description'):
+        if alert.custom_subject:
+            default_desc = alert.custom_subject
+        elif options.get('description'):
             default_desc = options.get('description')
+        else:
+            default_desc = self.DESCRIPTION_STR.format(alert_name=alert.name)
 
         incident_key = self.KEY_STRING.format(alert_id=alert.id, query_id=query.id)
         data = {
@@ -57,6 +59,9 @@ class PagerDuty(BaseDestination):
                 'source': 'redash',
             }
         }
+
+        if alert.custom_body:
+            data['payload']['custom_details'] = alert.custom_body
 
         if new_state == 'triggered':
             data['event_action'] = 'trigger'
